@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Falling Ball Game</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #000000; /* Black background for the whole page */
+            color: #fff; 
+            touch-action: none;
+            overflow: hidden; /* Prevent scrollbars if canvas is slightly larger than viewport */
+        }
+        #gameContainer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%; 
+        }
+        canvas {
+            background-color: #000000; 
+            display: block;
+            border-radius: 8px; 
+        }
+        #controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            position: relative; 
+            z-index: 10; 
+        }
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            color: white;
+            background-color: #007bff; 
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            box-shadow: 0 2px 4px rgba(255,255,255,0.1);
+        }
+        button#resetButton {
+            background-color: #6c757d; 
+            position: fixed; 
+            bottom: 20px;
+            right: 20px;
+            z-index: 100; 
+        }
+        button:hover {
+            opacity: 0.8;
+        }
+        button:active {
+            transform: translateY(1px);
+        }
+        .message-box {
+            position: fixed; 
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(50, 50, 50, 0.9);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            z-index: 1000; 
+            display: none;
+            font-size: 24px;
+        }
+        #fallCounter {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            font-size: 20px;
+            color: #FFFFFF;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        #scoreBoard {
+            position: fixed;
+            top: 45px; /* Position below the fall counter */
+            right: 10px;
+            width: 180px; /* Adjust width as needed */
+            max-height: 300px; /* Limit height and allow scroll if many scores */
+            overflow-y: auto;
+            font-size: 14px;
+            color: #FFFFFF;
+            background-color: rgba(0,0,0,0.6);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 99; /* Below fall counter but above canvas */
+            border: 1px solid #333;
+        }
+        #scoreBoard h3 {
+            margin-top: 0;
+            margin-bottom: 8px;
+            font-size: 16px;
+            text-align: center;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+        #scoreBoard ol {
+            list-style-type: decimal;
+            padding-left: 20px;
+            margin: 0;
+        }
+        #scoreBoard li {
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="fallCounter">Fall: 0.0 m</div>
+    <div id="scoreBoard">
+        <h3>Top Falls</h3>
+        <ol id="topScoresList"></ol>
+    </div>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        <div id="controls">
+            <button id="startButton">Start Drop</button>
+            </div>
+    </div>
+    <button id="resetButton">Reset Drop</button> 
+    <div id="infoMessage" class="message-box"></div>
+
+    <script>
+        // Canvas and context
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // DOM Elements
+        const startButton = document.getElementById('startButton');
+        const resetButton = document.getElementById('resetButton');
+        const infoMessage = document.getElementById('infoMessage');
+        const fallCounterElement = document.getElementById('fallCounter');
+        const topScoresListElement = document.getElementById('topScoresList');
+
+        // --- Game State & Configuration ---
+        let ball = {
+            x: 0,
+            y: 0,
+            radius: 12,
+            dx: 0,
+            dy: 0,
+            color: "#FFFFFF" // White ball
+        };
+
+        const gravity = 0.18;
+        const bounceFactor = 0.65;
+        const friction = 0.005;
+
+        let obstacles = [];
+        const obstacleRadius = 30; // Base radius for collision circle and sizing other shapes
+        const OBSTACLE_MAX_HITS = 3;
+        const OBSTACLE_VANISH_DELAY = 500; // milliseconds
+
+        let gameRunning = false;
+        let animationFrameId;
+        let gameStartedOnce = false;
+
+        // Sound effect
+        let bounceSynth;
+
+        // World scroll properties
+        let worldOffsetY = 0; 
+        const PIXELS_PER_METER = 100; 
+        let currentFallDistance = 0; // To store the fall distance of the current game
+
+        // Stuck ball detection
+        let lastFallUpdateTime = 0;
+        const STUCK_TIMEOUT = 10000; // 10 seconds in milliseconds
+        let isShowingStuckMessage = false;
+        let isResettingFromError = false; // Flag to prevent error reset loops
+
+        // Scoreboard
+        let topScores = [];
+        const MAX_TOP_SCORES = 10;
+
+        const OBSTACLE_DENSITY_FACTOR = 0.000147; 
+        const MAX_NEW_OBSTACLES_PER_SCROLL_EVENT = 20; 
+        const WALL_OBSTACLE_CHANCE = 0.2; 
+        const SHAPES = ['circle', 'square', 'rectangle', 'triangle'];
+
+        // --- Global Error Handler ---
+        window.onerror = function(message, source, lineno, colno, error) {
+            console.error("Global error caught:", message, "at", source, lineno, colno, error);
+            if (!isResettingFromError) { // Prevent reset loops if error occurs during reset
+                isResettingFromError = true; // Set flag
+                gameRunning = false;
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                }
+                infoMessage.textContent = "Error! Resetting game...";
+                infoMessage.style.display = 'block';
+                
+                // Attempt to save score before resetting due to error
+                addScoreToBoard(currentFallDistance); 
+
+                setTimeout(() => {
+                    resetGameElements(false); // Don't try to save score again here
+                    isResettingFromError = false; // Reset flag after handling
+                }, 2000); // Delay before reset
+            }
+            return true; // Prevents the default browser error handling
+        };
+
+
+        // --- Responsive Canvas ---
+        function resizeCanvas() {
+            const container = document.getElementById('gameContainer');
+            const maxWidth = 600; 
+            const maxHeight = window.innerHeight * 0.9; 
+            
+            let newWidth = Math.min(window.innerWidth * 0.95, maxWidth); 
+            canvas.width = newWidth;
+            canvas.height = Math.min(newWidth * 1.6, maxHeight); 
+
+            if (!gameRunning && !gameStartedOnce) {
+                resetGameElements();
+            } else {
+                const wasRunning = gameRunning;
+                gameRunning = false;
+                if(animationFrameId) cancelAnimationFrame(animationFrameId);
+                resetGameElements(); 
+                if (wasRunning && !isShowingStuckMessage && !isResettingFromError) { 
+                    gameRunning = true;
+                    gameLoop();
+                } else {
+                    drawEverything();
+                }
+            }
+        }
+
+        // --- Initialization ---
+        function initializeAudio() {
+            if (!bounceSynth && Tone.context.state !== 'running') {
+                Tone.start(); // Ensure Tone.js is started by user gesture
+            }
+            // It's good practice to check if bounceSynth already exists and is usable
+            if (!bounceSynth || bounceSynth.disposed) {
+                 bounceSynth = new Tone.Synth({
+                    oscillator: { type: "triangle" },
+                    envelope: { attack: 0.005, decay: 0.1, sustain: 0.01, release: 0.1 },
+                    volume: -12
+                }).toDestination();
+            }
+        }
+        
+        function startGame() {
+            if (isShowingStuckMessage || isResettingFromError) return; 
+
+            if (!gameStartedOnce) {
+                if (Tone.context.state !== 'running') {
+                    Tone.start().then(() => {
+                        initializeAudio();
+                        gameStartedOnce = true;
+                        proceedWithGameStart();
+                    }).catch(e => {
+                        console.error("Error starting AudioContext on first start:", e);
+                        // Potentially inform user they need to interact for sound
+                    });
+                } else {
+                    initializeAudio();
+                    gameStartedOnce = true;
+                    proceedWithGameStart();
+                }
+            } else if (!gameRunning) {
+                initializeAudio(); // Ensure synth is ready on subsequent starts
+                proceedWithGameStart();
+            }
+        }
+
+        function proceedWithGameStart() {
+            if(!gameRunning) { 
+                 resetGameElements(); 
+            }
+            gameRunning = true;
+            isShowingStuckMessage = false;
+            isResettingFromError = false; // Clear error flag on successful start
+            infoMessage.style.display = 'none';
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            gameLoop();
+        }
+
+        function resetGameElements(isEndOfGame = false) {
+            if (isEndOfGame && !isResettingFromError) { // Only save score if not resetting from an error that might have corrupted it
+                addScoreToBoard(currentFallDistance);
+            }
+            currentFallDistance = 0; 
+            worldOffsetY = 0;
+            lastFallUpdateTime = Date.now(); 
+            updateFallCounter(); 
+            resetBallPosition();
+            obstacles = []; 
+            initializeObstacles(canvas.height * 2); 
+            drawEverything();
+            isShowingStuckMessage = false;
+            // infoMessage.style.display = 'none'; // This might hide the error message too soon if called directly
+            updateScoreBoardDisplay(); 
+        }
+
+        function resetBallPosition() {
+            ball.x = canvas.width / 2;
+            ball.y = ball.radius + 50; 
+            ball.dx = (Math.random() - 0.5) * 3; 
+            ball.dy = 0;
+        }
+        
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        }
+
+        function initializeObstacles(fillHeight) {
+            const numberOfObstaclesToTry = Math.floor(canvas.width * fillHeight * OBSTACLE_DENSITY_FACTOR);
+            for (let i = 0; i < numberOfObstaclesToTry; i++) {
+                let newObstacleY = Math.random() * fillHeight; 
+                addRandomObstacle(newObstacleY);
+            }
+        }
+        
+        function addRandomObstacle(yPositionBase = canvas.height) {
+            let x;
+            let isWallObstacle = false;
+            let wallSide = null; 
+            let visibleAngle = Math.PI * 2; 
+            let shape = SHAPES[Math.floor(Math.random() * SHAPES.length)]; 
+            let angle = Math.random() * Math.PI * 2; 
+
+            if (Math.random() < WALL_OBSTACLE_CHANCE) {
+                isWallObstacle = true;
+                angle = 0; 
+                if (shape === 'circle') {
+                    visibleAngle = Math.random() * (Math.PI * 1.2 - Math.PI / 3) + Math.PI / 3; 
+                }
+                
+                if (Math.random() < 0.5) { 
+                    wallSide = 'left';
+                    x = 0; 
+                } else { 
+                    wallSide = 'right';
+                    x = canvas.width; 
+                }
+            } else {
+                const edgeClearance = ball.radius * 2; 
+                const minX = obstacleRadius + edgeClearance; 
+                const maxX = canvas.width - obstacleRadius - edgeClearance;
+
+                if (maxX <= minX) {
+                    return; 
+                }
+                x = Math.random() * (maxX - minX) + minX;
+            }
+
+            const y = yPositionBase + (Math.random() * canvas.height * 0.5); 
+
+            let canPlace = true;
+            const minObstacleToObstacleSpacing = obstacleRadius * 2 + ball.radius * 4; 
+
+            for (const obs of obstacles) { 
+                const dist = Math.sqrt((x - obs.x)**2 + (y - obs.y)**2);
+                if (dist < minObstacleToObstacleSpacing) { 
+                    canPlace = false;
+                    break;
+                }
+            }
+
+            if (canPlace) {
+                 obstacles.push({
+                    x: x, 
+                    y: y, 
+                    radius: obstacleRadius, 
+                    color: getRandomColor(),
+                    isWall: isWallObstacle, 
+                    side: wallSide, 
+                    visibleAngle: visibleAngle, 
+                    shape: shape,
+                    angle: angle, 
+                    hitCount: 0, 
+                    timeMarkedForDisappearance: null, 
+                    isVanished: false 
+                });
+            }
+        }
+
+        // --- Sound ---
+        function playBounceSound() {
+            if (bounceSynth && !bounceSynth.disposed && Tone.context.state === 'running') {
+                try {
+                    const notes = ["C3", "E3", "G3", "A3", "C4"]; 
+                    const randomNote = notes[Math.floor(Math.random() * notes.length)]; 
+                    bounceSynth.triggerAttackRelease(randomNote, "32n", undefined, Math.random() * 0.2 + 0.5);
+                } catch (e) {
+                    console.warn("Tone.js error playing sound:", e);
+                    // Potentially re-initialize synth or provide feedback
+                    // For now, just log and continue
+                }
+            }
+        }
+
+        // --- Event Listeners ---
+        let stuckResetTimeoutId = null; 
+        startButton.addEventListener('click', startGame);
+        resetButton.addEventListener('click', () => {
+            if (isShowingStuckMessage || isResettingFromError) { 
+                if(stuckResetTimeoutId) clearTimeout(stuckResetTimeoutId); 
+            }
+            gameRunning = false; 
+            if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+            resetGameElements(true); 
+        });
+
+        // --- Drawing Functions ---
+        function drawBall() {
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2); 
+            ctx.fillStyle = ball.color;
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        function drawObstacles() {
+            obstacles.forEach(obstacle => { 
+                if (obstacle.isVanished) return; 
+
+                ctx.fillStyle = obstacle.color; 
+                
+                if (obstacle.isWall) {
+                    ctx.beginPath();
+                    switch (obstacle.shape) {
+                        case 'circle':
+                            if (obstacle.side === 'left') {
+                                ctx.arc(obstacle.x, obstacle.y, obstacle.radius, -obstacle.visibleAngle / 2, obstacle.visibleAngle / 2);
+                            } else { 
+                                ctx.arc(obstacle.x, obstacle.y, obstacle.radius, Math.PI - obstacle.visibleAngle / 2, Math.PI + obstacle.visibleAngle / 2);
+                            }
+                            break;
+                        case 'square':
+                            const wallSquareSize = obstacle.radius * 1.8;
+                            if (obstacle.side === 'left') {
+                                ctx.rect(0, obstacle.y - wallSquareSize / 2, wallSquareSize / 2, wallSquareSize);
+                            } else { 
+                                ctx.rect(canvas.width - wallSquareSize / 2, obstacle.y - wallSquareSize / 2, wallSquareSize / 2, wallSquareSize);
+                            }
+                            break;
+                        case 'rectangle':
+                            const wallRectWidth = obstacle.radius * 2.2;
+                            const wallRectHeight = obstacle.radius * 1.4;
+                            if (obstacle.side === 'left') {
+                                ctx.rect(0, obstacle.y - wallRectHeight / 2, wallRectWidth / 2, wallRectHeight);
+                            } else { 
+                                ctx.rect(canvas.width - wallRectWidth / 2, obstacle.y - wallRectHeight / 2, wallRectWidth / 2, wallRectHeight);
+                            }
+                            break;
+                        case 'triangle': 
+                            const legLength = obstacle.radius; 
+                            if (obstacle.side === 'left') {
+                                ctx.moveTo(0, obstacle.y - legLength);
+                                ctx.lineTo(legLength, obstacle.y);
+                                ctx.lineTo(0, obstacle.y + legLength);
+                            } else { 
+                                ctx.moveTo(canvas.width, obstacle.y - legLength);
+                                ctx.lineTo(canvas.width - legLength, obstacle.y);
+                                ctx.lineTo(canvas.width, obstacle.y + legLength);
+                            }
+                            ctx.closePath();
+                            break;
+                    }
+                    ctx.fill();
+                } else {
+                    ctx.save(); 
+                    ctx.translate(obstacle.x, obstacle.y); 
+                    ctx.rotate(obstacle.angle); 
+                    
+                    ctx.beginPath();
+                    switch (obstacle.shape) {
+                        case 'circle':
+                            ctx.arc(0, 0, obstacle.radius, 0, Math.PI * 2); 
+                            break;
+                        case 'square':
+                            const squareSize = obstacle.radius * 1.8; 
+                            ctx.rect(-squareSize / 2, -squareSize / 2, squareSize, squareSize); 
+                            break;
+                        case 'rectangle':
+                            const rectWidth = obstacle.radius * 2.2; 
+                            const rectHeight = obstacle.radius * 1.4;
+                            ctx.rect(-rectWidth / 2, -rectHeight / 2, rectWidth, rectHeight); 
+                            break;
+                        case 'triangle': 
+                            const R = obstacle.radius; 
+                            const sideLength = R * Math.sqrt(3);
+                            ctx.moveTo(0, -R); 
+                            ctx.lineTo(-sideLength / 2, R / 2); 
+                            ctx.lineTo(sideLength / 2, R / 2); 
+                            ctx.closePath(); 
+                            break;
+                    }
+                    ctx.fill();
+                    ctx.restore(); 
+                }
+            });
+        }
+        
+        function drawEverything() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height); 
+            drawObstacles(); 
+            drawBall(); 
+        }
+
+        // --- Game Logic & Physics ---
+        function updateFallCounter() {
+            currentFallDistance = parseFloat((worldOffsetY / PIXELS_PER_METER).toFixed(1));
+            fallCounterElement.textContent = `Fall: ${currentFallDistance} m`;
+        }
+
+        function updateObstaclesState() {
+            const currentTime = Date.now();
+            obstacles.forEach(obstacle => {
+                if (obstacle.timeMarkedForDisappearance !== null && 
+                    !obstacle.isVanished && 
+                    currentTime > obstacle.timeMarkedForDisappearance + OBSTACLE_VANISH_DELAY) {
+                    obstacle.isVanished = true;
+                }
+            });
+        }
+
+        // --- Collision Detection Functions ---
+
+        function circleCircleCollision(ball, circleObstacle) {
+            const distX = ball.x - circleObstacle.x;
+            const distY = ball.y - circleObstacle.y;
+            const distanceSquared = distX * distX + distY * distY;
+            const sumRadiiSquared = (ball.radius + circleObstacle.radius) * (ball.radius + circleObstacle.radius);
+
+            if (distanceSquared < sumRadiiSquared) {
+                const distance = Math.sqrt(distanceSquared);
+                const overlap = ball.radius + circleObstacle.radius - distance;
+                let normalX = distX / distance;
+                let normalY = distY / distance;
+                if (distance === 0) { 
+                    normalX = 1; normalY = 0;
+                }
+                return {
+                    collided: true,
+                    normalX: normalX,
+                    normalY: normalY,
+                    overlap: overlap
+                };
+            }
+            return { collided: false };
+        }
+
+        function circleIntersectsRotatedRectangle(ball, rectObstacle) {
+            let rectVisualWidth, rectVisualHeight;
+            if (rectObstacle.shape === 'square') {
+                rectVisualWidth = rectObstacle.radius * 1.8; 
+                rectVisualHeight = rectVisualWidth;
+            } else { 
+                rectVisualWidth = rectObstacle.radius * 2.2; 
+                rectVisualHeight = rectObstacle.radius * 1.4; 
+            }
+
+            const halfWidth = rectVisualWidth / 2;
+            const halfHeight = rectVisualHeight / 2;
+
+            const dx = ball.x - rectObstacle.x;
+            const dy = ball.y - rectObstacle.y;
+            const cosAngle = Math.cos(-rectObstacle.angle); 
+            const sinAngle = Math.sin(-rectObstacle.angle);
+
+            const localBallX = dx * cosAngle - dy * sinAngle;
+            const localBallY = dx * sinAngle + dy * cosAngle;
+
+            const closestX = Math.max(-halfWidth, Math.min(localBallX, halfWidth));
+            const closestY = Math.max(-halfHeight, Math.min(localBallY, halfHeight));
+
+            const distanceX = localBallX - closestX;
+            const distanceY = localBallY - closestY;
+            const distanceSquared = (distanceX * distanceX) + (distanceY * distanceY);
+
+            if (distanceSquared < ball.radius * ball.radius) {
+                let normalLocalX, normalLocalY;
+                if (distanceSquared === 0) { 
+                    normalLocalX = localBallX !== 0 ? localBallX : (Math.random() - 0.5) * 2;
+                    normalLocalY = localBallY !== 0 ? localBallY : (Math.random() - 0.5) * 2;
+                } else {
+                    normalLocalX = distanceX;
+                    normalLocalY = distanceY;
+                }
+                
+                const len = Math.sqrt(normalLocalX * normalLocalX + normalLocalY * normalLocalY);
+                if (len === 0) { normalLocalX = 1; normalLocalY = 0; } 
+                else { normalLocalX /= len; normalLocalY /= len; }
+
+                const worldNormalX = normalLocalX * Math.cos(rectObstacle.angle) - normalLocalY * Math.sin(rectObstacle.angle);
+                const worldNormalY = normalLocalX * Math.sin(rectObstacle.angle) + normalLocalY * Math.cos(rectObstacle.angle);
+                
+                return {
+                    collided: true,
+                    normalX: worldNormalX,
+                    normalY: worldNormalY,
+                    overlap: ball.radius - Math.sqrt(distanceSquared)
+                };
+            }
+            return { collided: false };
+        }
+
+        function circleIntersectsRotatedTriangleAABB(ball, triObstacle) {
+            const R = triObstacle.radius;
+            const localMinX = -R * Math.sqrt(3) / 2;
+            const localMaxX = R * Math.sqrt(3) / 2;
+            const localMinY = -R;
+            const localMaxY = R / 2;
+
+            const dx = ball.x - triObstacle.x;
+            const dy = ball.y - triObstacle.y;
+            const cosAngle = Math.cos(-triObstacle.angle); 
+            const sinAngle = Math.sin(-triObstacle.angle);
+
+            const localBallX = dx * cosAngle - dy * sinAngle;
+            const localBallY = dx * sinAngle + dy * cosAngle;
+
+            const closestX = Math.max(localMinX, Math.min(localBallX, localMaxX));
+            const closestY = Math.max(localMinY, Math.min(localBallY, localMaxY));
+
+            const distanceX = localBallX - closestX;
+            const distanceY = localBallY - closestY;
+            const distanceSquared = (distanceX * distanceX) + (distanceY * distanceY);
+
+            if (distanceSquared < ball.radius * ball.radius) {
+                let normalLocalX, normalLocalY;
+                 if (distanceSquared === 0) {
+                    normalLocalX = localBallX !== 0 ? localBallX : (Math.random() - 0.5) * 2;
+                    normalLocalY = localBallY !== 0 ? localBallY : (Math.random() - 0.5) * 2;
+                } else {
+                    normalLocalX = distanceX;
+                    normalLocalY = distanceY;
+                }
+                
+                const len = Math.sqrt(normalLocalX * normalLocalX + normalLocalY * normalLocalY);
+                if (len === 0) { normalLocalX = 1; normalLocalY = 0; }
+                else { normalLocalX /= len; normalLocalY /= len; }
+
+                const worldNormalX = normalLocalX * Math.cos(triObstacle.angle) - normalLocalY * Math.sin(triObstacle.angle);
+                const worldNormalY = normalLocalX * Math.sin(triObstacle.angle) + normalLocalY * Math.cos(triObstacle.angle);
+                
+                return {
+                    collided: true,
+                    normalX: worldNormalX,
+                    normalY: worldNormalY,
+                    overlap: ball.radius - Math.sqrt(distanceSquared)
+                };
+            }
+            return { collided: false };
+        }
+
+        function updateBall() {
+            if (!gameRunning) return; 
+
+            if (canvas.height <= 0) { 
+                console.warn("Canvas height is 0 or less. Skipping updateBall.");
+                return;
+            }
+
+            ball.dy += gravity;
+
+            if (ball.dx > 0) {
+                ball.dx -= friction;
+                if (ball.dx < 0) ball.dx = 0; 
+            } else if (ball.dx < 0) {
+                ball.dx += friction;
+                if (ball.dx > 0) ball.dx = 0; 
+            }
+
+            ball.x += ball.dx;
+            ball.y += ball.dy; 
+
+            if (ball.x + ball.radius > canvas.width) { 
+                ball.x = canvas.width - ball.radius; 
+                ball.dx *= -bounceFactor; 
+                playBounceSound();
+            } else if (ball.x - ball.radius < 0) { 
+                ball.x = ball.radius; 
+                ball.dx *= -bounceFactor; 
+                playBounceSound();
+            }
+
+            obstacles.forEach(obstacle => {
+                if (obstacle.isVanished) return; 
+
+                let collisionResult = { collided: false };
+
+                if (obstacle.isWall) { 
+                    collisionResult = circleCircleCollision(ball, obstacle);
+                } else {
+                    switch (obstacle.shape) {
+                        case 'circle':
+                            collisionResult = circleCircleCollision(ball, obstacle);
+                            break;
+                        case 'square':
+                        case 'rectangle':
+                            collisionResult = circleIntersectsRotatedRectangle(ball, obstacle);
+                            break;
+                        case 'triangle':
+                            collisionResult = circleIntersectsRotatedTriangleAABB(ball, obstacle);
+                            break;
+                    }
+                }
+
+                if (collisionResult.collided) {
+                    if (typeof collisionResult.normalX !== 'number' || typeof collisionResult.normalY !== 'number' || 
+                        isNaN(collisionResult.normalX) || isNaN(collisionResult.normalY) ) {
+                        console.warn("Invalid normal in collisionResult:", collisionResult, "for obstacle:", obstacle);
+                        let dx_norm = ball.x - obstacle.x;
+                        let dy_norm = ball.y - obstacle.y;
+                        let len_norm = Math.hypot(dx_norm, dy_norm) || 1;
+                        collisionResult.normalX = dx_norm / len_norm; 
+                        collisionResult.normalY = dy_norm / len_norm; 
+                         if (collisionResult.normalX === 0 && collisionResult.normalY === 0) { 
+                            collisionResult.normalY = -1; // Default to upward if still zero
+                        }
+                    }
+                    if (typeof collisionResult.overlap !== 'number' || isNaN(collisionResult.overlap)) {
+                        console.warn("Invalid overlap in collisionResult:", collisionResult, "for obstacle:", obstacle);
+                        collisionResult.overlap = 0.1; 
+                    }
+
+
+                    playBounceSound();
+                    obstacle.hitCount++;
+                    if (obstacle.hitCount >= OBSTACLE_MAX_HITS && obstacle.timeMarkedForDisappearance === null) {
+                        obstacle.timeMarkedForDisappearance = Date.now();
+                    }
+                    
+                    let dot = ball.dx * collisionResult.normalX + ball.dy * collisionResult.normalY;
+                    
+                    if (dot < 0) { 
+                        ball.dx -= (1 + bounceFactor) * dot * collisionResult.normalX;
+                        ball.dy -= (1 + bounceFactor) * dot * collisionResult.normalY;
+                    }
+
+                    const validOverlap = Math.max(0, collisionResult.overlap);
+                    ball.x += validOverlap * collisionResult.normalX;
+                    ball.y += validOverlap * collisionResult.normalY;
+                }
+            });
+
+            updateObstaclesState(); 
+
+            const currentScrollThresholdY = canvas.height * 0.6; 
+            if (ball.y > currentScrollThresholdY) {
+                const amountToShift = ball.y - currentScrollThresholdY; 
+                
+                if (amountToShift > 0.1) { 
+                    lastFallUpdateTime = Date.now();
+                }
+
+                ball.y -= amountToShift; 
+                worldOffsetY += amountToShift; 
+                updateFallCounter(); 
+
+                obstacles.forEach(o => o.y -= amountToShift);
+                manageObstacles(amountToShift);
+            }
+
+             if (ball.y - ball.radius < 0 && ball.dy < 0) {
+                ball.y = ball.radius; 
+                ball.dy *= -bounceFactor * 0.5; 
+            }
+        }
+
+        function manageObstacles(shiftedAmount) {
+            obstacles = obstacles.filter(o => (o.y + o.radius * 2 > 0) && !o.isVanished); 
+
+            let newObstaclesCount = Math.floor(canvas.width * shiftedAmount * OBSTACLE_DENSITY_FACTOR * 2);
+            newObstaclesCount = Math.min(newObstaclesCount, MAX_NEW_OBSTACLES_PER_SCROLL_EVENT); 
+
+            for (let i = 0; i < newObstaclesCount; i++) {
+                addRandomObstacle(canvas.height); 
+            }
+        }
+
+        // --- Scoreboard Functions ---
+        function loadScores() {
+            const savedScores = localStorage.getItem('topFallScores');
+            if (savedScores) {
+                try {
+                    topScores = JSON.parse(savedScores);
+                    if (!Array.isArray(topScores)) topScores = []; 
+                } catch (e) {
+                    console.error("Error parsing scores from localStorage:", e);
+                    topScores = [];
+                }
+            }
+            updateScoreBoardDisplay();
+        }
+
+        function saveScores() {
+            try {
+                localStorage.setItem('topFallScores', JSON.stringify(topScores));
+            } catch (e) {
+                console.error("Error saving scores to localStorage:", e);
+            }
+        }
+
+        function addScoreToBoard(score) {
+            if (typeof score !== 'number' || isNaN(score) || score <= 0) {
+                // console.warn("Attempted to add invalid score:", score); // Keep this for debugging if needed
+                return;
+            }
+            topScores.push({ distance: score });
+            topScores.sort((a, b) => b.distance - a.distance); 
+            topScores = topScores.slice(0, MAX_TOP_SCORES); 
+            saveScores();
+            updateScoreBoardDisplay();
+        }
+
+        function updateScoreBoardDisplay() {
+            topScoresListElement.innerHTML = ''; 
+            if (topScores.length === 0) {
+                const li = document.createElement('li');
+                li.textContent = 'No scores yet!';
+                topScoresListElement.appendChild(li);
+            } else {
+                topScores.forEach((score, index) => {
+                    const li = document.createElement('li');
+                    const distanceText = (typeof score.distance === 'number' && !isNaN(score.distance)) 
+                                         ? score.distance.toFixed(1) 
+                                         : 'N/A';
+                    li.textContent = `${(index + 1)}. ${distanceText} m`;
+                    topScoresListElement.appendChild(li);
+                });
+            }
+        }
+
+
+        function gameLoop() {
+            if (!gameRunning && !isShowingStuckMessage && !isResettingFromError) { 
+                if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                return;
+            }
+
+            if (gameRunning) { 
+                updateBall(); 
+                drawEverything(); 
+
+                if (Date.now() > lastFallUpdateTime + STUCK_TIMEOUT) {
+                    if (!isShowingStuckMessage) { 
+                        isShowingStuckMessage = true;
+                        gameRunning = false; 
+                        infoMessage.textContent = "Ball stuck! Resetting...";
+                        infoMessage.style.display = 'block';
+                        
+                        if (stuckResetTimeoutId) clearTimeout(stuckResetTimeoutId);
+
+                        stuckResetTimeoutId = setTimeout(() => {
+                            infoMessage.style.display = 'none';
+                            resetGameElements(true); 
+                        }, 1500); 
+                    }
+                }
+            } else if (isShowingStuckMessage || isResettingFromError) {
+                // If showing a message or resetting from error, only draw, don't update game logic
+                drawEverything(); 
+            }
+            
+            animationFrameId = requestAnimationFrame(gameLoop); 
+        }
+
+        // --- Initial Setup on Load ---
+        window.addEventListener('resize', () => {
+            resizeCanvas(); 
+        });
+
+        loadScores(); 
+        resizeCanvas(); 
+        updateFallCounter(); 
+        lastFallUpdateTime = Date.now(); 
+        console.log("Infinite Falling Ball Game initialized. Global error handler and Tone.js fix applied.");
+    </script>
+</body>
+</html>
